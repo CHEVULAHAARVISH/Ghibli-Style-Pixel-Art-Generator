@@ -5,6 +5,7 @@ from tkinter import ttk, filedialog
 from PIL import Image, ImageTk
 import os
 import time
+from skimage import filters
 
 
 class PixelArtWebcam:
@@ -53,6 +54,7 @@ class PixelArtWebcam:
         self.animation_style = "none"
         self.animation_frame = 0
         self.last_animation_time = time.time()
+        self.cartoon_effect = True
 
         # Extended color palettes
         self.setup_palettes()
@@ -103,6 +105,15 @@ class PixelArtWebcam:
         )
         self.animation_dropdown.pack(side=tk.LEFT, padx=5)
         self.animation_dropdown.bind("<<ComboboxSelected>>", self.update_animation)
+
+        # Create cartoon effect checkbox
+        self.cartoon_var = tk.BooleanVar(value=True)
+        self.cartoon_cb = ttk.Checkbutton(
+            self.camera_control_frame2,
+            text="Cartoon Effect",
+            variable=self.cartoon_var
+        )
+        self.cartoon_cb.pack(side=tk.LEFT, padx=5)
 
         # Create buttons
         self.camera_button_frame = ttk.Frame(self.camera_tab)
@@ -173,6 +184,15 @@ class PixelArtWebcam:
         self.upload_animation_dropdown.pack(side=tk.LEFT, padx=5)
         self.upload_animation_dropdown.bind("<<ComboboxSelected>>", self.update_animation)
 
+        # Create cartoon effect checkbox for uploads
+        self.upload_cartoon_var = tk.BooleanVar(value=True)
+        self.upload_cartoon_cb = ttk.Checkbutton(
+            self.upload_control_frame2,
+            text="Cartoon Effect",
+            variable=self.upload_cartoon_var
+        )
+        self.upload_cartoon_cb.pack(side=tk.LEFT, padx=5)
+
         # Create buttons for uploads
         self.upload_button_frame = ttk.Frame(self.upload_tab)
         self.upload_button_frame.pack(fill=tk.X, padx=10, pady=10)
@@ -201,9 +221,18 @@ class PixelArtWebcam:
     def setup_palettes(self):
         self.palettes = {
             "ghibli": [
-                [124, 176, 203], [188, 215, 200], [230, 216, 176],
-                [220, 161, 140], [190, 128, 128], [122, 143, 122],
-                [237, 177, 131], [170, 216, 232], [255, 232, 190]
+                [242, 230, 210],  # Light warm (paper-like)
+                [189, 174, 158],  # Neutral warm
+                [124, 176, 203],  # Studio Ghibli blue
+                [188, 215, 200],  # Soft green
+                [230, 216, 176],  # Warm highlight
+                [220, 161, 140],  # Peach
+                [190, 128, 128],  # Dusty rose
+                [122, 143, 122],  # Muted green
+                [237, 177, 131],  # Warm orange
+                [170, 216, 232],  # Sky blue
+                [255, 232, 190],  # Warm light
+                [180, 150, 130]  # Neutral shadow
             ],
             "retro": [
                 [56, 32, 38], [126, 37, 83], [171, 82, 54],
@@ -388,36 +417,60 @@ class PixelArtWebcam:
 
         return image
 
-    def create_pixel_art(self, frame, pixel_size, palette_name):
-        # Resize to create pixelation effect
-        height, width = frame.shape[:2]
-        small_frame = cv2.resize(frame, (width // pixel_size, height // pixel_size),
+    def create_pixel_art(self, frame, pixel_size, palette_name, cartoon_effect=True):
+        # Convert to RGB if needed
+        if frame.shape[2] == 3 and frame.dtype == 'uint8':  # Assume it's BGR
+            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        else:
+            rgb_frame = frame.copy()
+
+        # Apply cartoon effect if requested
+        if cartoon_effect:
+            # 1. Edge detection (for outlines)
+            gray = cv2.cvtColor(rgb_frame, cv2.COLOR_RGB2GRAY)
+            gray = cv2.medianBlur(gray, 5)
+            edges = cv2.adaptiveThreshold(gray, 255,
+                                          cv2.ADAPTIVE_THRESH_MEAN_C,
+                                          cv2.THRESH_BINARY, 9, 9)
+
+            # 2. Color quantization (posterization)
+            img_quantized = rgb_frame.copy()
+            for _ in range(3):  # Multiple iterations for smoother quantization
+                img_quantized = cv2.bilateralFilter(img_quantized, 9, 75, 75)
+
+            # 3. Combine edges with quantized image
+            edges = cv2.cvtColor(edges, cv2.COLOR_GRAY2RGB)
+            cartoon = cv2.bitwise_and(img_quantized, edges)
+
+            # Use this as our base for pixelation
+            frame_to_pixelate = cartoon
+        else:
+            frame_to_pixelate = rgb_frame
+
+        # Pixelation
+        height, width = frame_to_pixelate.shape[:2]
+        small_frame = cv2.resize(frame_to_pixelate,
+                                 (width // pixel_size, height // pixel_size),
                                  interpolation=cv2.INTER_LINEAR)
-        # Scale back up using nearest neighbor
-        pixel_frame = cv2.resize(small_frame, (width, height),
+        pixel_frame = cv2.resize(small_frame,
+                                 (width, height),
                                  interpolation=cv2.INTER_NEAREST)
 
         # Apply color palette
         palette = np.array(self.palettes.get(palette_name, self.palettes["ghibli"]), dtype=np.uint8)
 
-        # Convert to RGB for easier color mapping
-        if frame.shape[2] == 3:  # If RGB already
-            rgb_pixel_frame = pixel_frame
-        else:  # If BGR (from OpenCV)
-            rgb_pixel_frame = cv2.cvtColor(pixel_frame, cv2.COLOR_BGR2RGB)
-
-        # Apply color palette (map each pixel to closest palette color)
-        h, w, _ = rgb_pixel_frame.shape
-
         # Vectorized version (faster)
-        reshaped_frame = rgb_pixel_frame.reshape((-1, 3))
+        h, w, _ = pixel_frame.shape
+        reshaped_frame = pixel_frame.reshape((-1, 3))
         distances = np.sqrt(((reshaped_frame[:, np.newaxis, :].astype(np.float32) -
                               palette[np.newaxis, :, :].astype(np.float32)) ** 2).sum(axis=2))
         indices = np.argmin(distances, axis=1)
         result = palette[indices].reshape(h, w, 3)
 
-        # Ensure the result is uint8
-        result = np.array(result, dtype=np.uint8)
+        # Add subtle paper texture for cartoon effect
+        if cartoon_effect:
+            texture = np.random.normal(0, 8, result.shape).astype(np.float32)
+            result = np.clip(result.astype(np.float32) + texture, 0, 255).astype(np.uint8)
 
         return result
 
@@ -426,7 +479,8 @@ class PixelArtWebcam:
             self.pixel_art_image = self.create_pixel_art(
                 self.current_frame,
                 self.pixel_size_var.get(),
-                self.palette_var.get()
+                self.palette_var.get(),
+                self.cartoon_var.get()
             )
             self.pixelated = True
 
@@ -474,7 +528,8 @@ class PixelArtWebcam:
             self.pixelated_upload = self.create_pixel_art(
                 self.uploaded_image,
                 self.upload_pixel_size_var.get(),
-                self.upload_palette_var.get()
+                self.upload_palette_var.get(),
+                self.upload_cartoon_var.get()
             )
 
             # Display the pixelated image
